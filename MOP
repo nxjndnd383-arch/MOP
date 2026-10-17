@@ -1,0 +1,589 @@
+-- ═══════════════════════════════════════════════════════════════
+-- 🤖 AUTO FARM COMPLETE SYSTEM
+-- Based on MgGG.lua Analysis
+-- Version: 1.0
+-- ═══════════════════════════════════════════════════════════════
+
+-- ป้องกันรันซ้ำ
+if _G.AUTO_FARM_LOADED then
+    warn("[AUTO] Script already loaded!")
+    return
+end
+_G.AUTO_FARM_LOADED = true
+
+-- ═══════════════════════════════════════════════
+-- SERVICES
+-- ═══════════════════════════════════════════════
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local HttpService = game:GetService("HttpService")
+local RunService = game:GetService("RunService")
+local Workspace = game:GetService("Workspace")
+local CollectionService = game:GetService("CollectionService")
+local TweenService = game:GetService("TweenService")
+local UserInputService = game:GetService("UserInputService")
+local ProximityPromptService = game:GetService("ProximityPromptService")
+
+local LocalPlayer = Players.LocalPlayer
+local PlayerGui = LocalPlayer:WaitForChild("PlayerGui")
+local Remotes = ReplicatedStorage:WaitForChild("Remotes", 30)
+local Modules = ReplicatedStorage:WaitForChild("Modules", 30)
+
+-- ═══════════════════════════════════════════════
+-- MODULES (safe require)
+-- ═══════════════════════════════════════════════
+local function safeRequire(parent, name)
+    local mod = parent and parent:FindFirstChild(name)
+    if mod then
+        local ok, result = pcall(require, mod)
+        if ok then return result end
+    end
+    return nil
+end
+
+local BigMoney = safeRequire(Modules, "BigMoneyManager")
+local RebirthConfig = safeRequire(Modules, "RebirthConfig")
+local PetSkillConfig = safeRequire(Modules, "PetSkillConfig")
+local BarnConfig = safeRequire(Modules, "BarnConfig")
+local DeliveryConfig = safeRequire(Modules, "DeliveryConfig")
+local FarmMasteryConfig = safeRequire(Modules, "FarmMasteryConfig")
+local FactoryConfig = safeRequire(Modules, "FactoryConfig")
+local CurrencyFormatter = safeRequire(Modules, "CurrencyFormatter")
+local AnimalConfig = safeRequire(ReplicatedStorage:FindFirstChild("Animals"), "AnimalConfig")
+
+-- ═══════════════════════════════════════════════
+-- CONFIG
+-- ═══════════════════════════════════════════════
+local CONFIG = {
+    -- Water
+    AutoWater = true,
+    WaterRange = 20,
+    WaterCooldown = 0.5,
+    
+    -- Collect
+    AutoCollect = true,
+    CollectRange = 15,
+    CollectCooldown = 0.2,
+    
+    -- Delivery
+    AutoDelivery = true,
+    DeliveryThreshold = 0.85,
+    DeliveryCooldown = 3,
+    
+    -- Buy Animal
+    AutoBuyAnimal = true,
+    BuyAnimalList = {"Chicken", "Sheep", "Pig", "Cow"},
+    MinMoneyReserve = 50000,
+    BuyCooldown = 5,
+    
+    -- Factory
+    AutoFactory = true,
+    AutoStartProduction = true,
+    AutoClaimProduction = true,
+    FactoryCooldown = 2,
+    
+    -- Quest
+    AutoClaimQuest = true,
+    QuestCooldown = 5,
+    
+    -- Rebirth
+    AutoRebirth = true,
+    RebirthCooldown = 30,
+    
+    -- Pet
+    AutoEquipBestPet = true,
+    PetEquipCooldown = 10,
+    
+    -- Teleport
+    AutoTeleport = true,
+    TeleportRange = 60, -- ถ้าไกลกว่านี้จะ teleport
+    
+    -- Random Event
+    AutoCollectEventItems = true,
+    
+    -- Debug
+    Debug = true,
+}
+
+-- ═══════════════════════════════════════════════
+-- HELPER FUNCTIONS
+-- ═══════════════════════════════════════════════
+local function log(...)
+    if CONFIG.Debug then
+        print("[AUTO]", ...)
+    end
+end
+
+local function getPlayerFarm()
+    local farmFolder = Workspace:FindFirstChild("Farm")
+    if not farmFolder then return nil end
+    for _, farm in ipairs(farmFolder:GetChildren()) do
+        if farm:GetAttribute("OwnerId") == LocalPlayer.UserId then
+            return farm
+        end
+    end
+    return nil
+end
+
+local function getCharacter()
+    local char = LocalPlayer.Character
+    if not char then return nil, nil end
+    local hrp = char:FindFirstChild("HumanoidRootPart")
+    return char, hrp
+end
+
+local function getHumanoid()
+    local char = LocalPlayer.Character
+    if not char then return nil end
+    return char:FindFirstChildOfClass("Humanoid")
+end
+
+local function getInventory()
+    local json = LocalPlayer:GetAttribute("Inventory_JSON") or "{}"
+    local ok, data = pcall(HttpService.JSONDecode, HttpService, json)
+    return (ok and type(data) == "table") and data or {}
+end
+
+local function getMoney()
+    local bn = LocalPlayer:GetAttribute("Money_BN")
+    if bn then return bn end
+    return tostring(LocalPlayer:GetAttribute("Money") or 0)
+end
+
+local function getMoneyNumber()
+    if BigMoney then
+        return BigMoney.toNumber(getMoney())
+    end
+    return tonumber(getMoney()) or 0
+end
+
+local function distance(pos1, pos2)
+    return (pos1 - pos2).Magnitude
+end
+
+-- Teleport เบาๆ (ไม่ผ่าน anti-cheat)
+local function teleportTo(targetPos)
+    local char, hrp = getCharacter()
+    if not char or not hrp then return end
+    
+    -- ใช้ CFrame โดยตรง (เบาๆ)
+    hrp.CFrame = CFrame.new(targetPos + Vector3.new(0, 3, 0))
+end
+
+-- เดินไปหา
+local function walkTo(targetPos)
+    local humanoid = getHumanoid()
+    if humanoid then
+        humanoid:MoveTo(targetPos)
+    end
+end
+
+-- ═══════════════════════════════════════════════
+-- REMOTES
+-- ═══════════════════════════════════════════════
+local function getRemote(name)
+    if not Remotes then return nil end
+    return Remotes:FindFirstChild(name)
+end
+
+local RequestSendDelivery = getRemote("RequestSendDelivery")
+local RequestBuyAnimal = getRemote("RequestBuyAnimal")
+local RequestStartProduction = getRemote("RequestStartProduction")
+local RequestClaimProduction = getRemote("RequestClaimProduction")
+local RequestQuestData = getRemote("RequestQuestData")
+local ClaimQuest = getRemote("ClaimQuest")
+local RequestRebirth = ReplicatedStorage:FindFirstChild("RequestRebirth")
+local PetEquipRemote = getRemote("PetEquipRemote")
+local RequestPetUpgrade = getRemote("RequestPetUpgrade")
+local RequestUniversalUpgrade = getRemote("RequestUniversalUpgrade")
+local RequestTransferAnimal = getRemote("RequestTransferAnimal")
+local GlobalNotification = getRemote("GlobalNotification")
+
+-- ═══════════════════════════════════════════════
+-- ระบบ 1: AUTO WATER + COLLECT
+-- ═══════════════════════════════════════════════
+local function findWateringCan()
+    local char = LocalPlayer.Character
+    if not char then return nil end
+    local tool = char:FindFirstChild("Watering Can")
+    if tool then return tool end
+    local backpack = LocalPlayer:FindFirstChild("Backpack")
+    if backpack then
+        tool = backpack:FindFirstChild("Watering Can")
+        if tool then
+            tool.Parent = char
+            return tool
+        end
+    end
+    return nil
+end
+
+local function getWateringCanStatus(tool)
+    if not tool then return 0, 100 end
+    return tool:GetAttribute("WaterAmount") or 0, tool:GetAttribute("MaxWater") or 100
+end
+
+local function findGrassNodes(farm)
+    local list = {}
+    for _, node in ipairs(CollectionService:GetTagged("GrassNode")) do
+        if node:IsA("Attachment") and node:IsDescendantOf(farm) then
+            table.insert(list, {
+                node = node,
+                pos = node.WorldPosition,
+                growth = node:GetAttribute("GrowthLevel") or 0,
+            })
+        end
+    end
+    return list
+end
+
+local function autoWaterLoop()
+    task.spawn(function()
+        log("💧 Auto Water started")
+        while CONFIG.AutoWater and _G.AUTO_FARM_LOADED do
+            task.wait(CONFIG.WaterCooldown)
+            
+            local farm = getPlayerFarm()
+            local char, hrp = getCharacter()
+            if not farm or not hrp then continue end
+            
+            local tool = findWateringCan()
+            if not tool then continue end
+            
+            local waterAmount, maxWater = getWateringCanStatus(tool)
+            
+            -- ถ้าน้ำหมด ให้ไปเติมที่ Sumur
+            if waterAmount <= 0 then
+                local well = farm:FindFirstChild("ActiveWell")
+                if well then
+                    local waterClaim = well:FindFirstChild("WaterClaim", true)
+                    if waterClaim and distance(hrp.Position, waterClaim.Position) > 6 then
+                        walkTo(waterClaim.Position)
+                    end
+                end
+                continue
+            end
+            
+            -- หาหญ้าที่ต้องรด (ใกล้ที่สุด)
+            local nodes = findGrassNodes(farm)
+            local target = nil
+            local targetDist = math.huge
+            for _, n in ipairs(nodes) do
+                if n.growth < 100 then
+                    local d = distance(hrp.Position, n.pos)
+                    if d < targetDist and d <= CONFIG.WaterRange then
+                        target = n
+                        targetDist = d
+                    end
+                end
+            end
+            
+            if target then
+                -- เดินไปถ้าไกล
+                if targetDist > 8 then
+                    walkTo(target.pos)
+                else
+                    -- อยู่ในระยะ: activate tool
+                    pcall(function()
+                        tool:Activate()
+                        task.wait(0.4)
+                        tool:Deactivate()
+                    end)
+                end
+            end
+        end
+        log("💧 Auto Water stopped")
+    end)
+end
+
+-- ═══════════════════════════════════════════════
+-- ระบบ 2: AUTO COLLECT PRODUCT
+-- ═══════════════════════════════════════════════
+local function autoCollectLoop()
+    task.spawn(function()
+        log("📦 Auto Collect started")
+        while CONFIG.AutoCollect and _G.AUTO_FARM_LOADED do
+            task.wait(CONFIG.CollectCooldown)
+            
+            local farm = getPlayerFarm()
+            local char, hrp = getCharacter()
+            if not farm or not hrp then continue end
+            
+            -- หา products ทั้งหมด
+            local nearest = nil
+            local nearestDist = math.huge
+            
+            for _, obj in ipairs(CollectionService:GetTagged("FarmProduct")) do
+                if not obj.Parent or not obj:IsDescendantOf(farm) then continue end
+                
+                local basePart = obj:IsA("BasePart") and obj or obj:FindFirstChildWhichIsA("BasePart")
+                if not basePart then continue end
+                
+                local d = distance(hrp.Position, basePart.Position)
+                if d < nearestDist then
+                    nearest = {
+                        obj = obj,
+                        part = basePart,
+                        pos = basePart.Position,
+                    }
+                    nearestDist = d
+                end
+            end
+            
+            if nearest then
+                if nearestDist > CONFIG.CollectRange then
+                    walkTo(nearest.pos)
+                else
+                    -- ใช้ proximity prompt
+                    local prompt = nearest.obj:FindFirstChild("ProductPrompt", true)
+                    if prompt and prompt:IsA("ProximityPrompt") and prompt.Enabled then
+                        pcall(function()
+                            prompt:InputHoldBegin()
+                            task.wait(0.05)
+                            prompt:InputHoldEnd()
+                        end)
+                    end
+                end
+            end
+        end
+        log("📦 Auto Collect stopped")
+    end)
+end
+
+-- ═══════════════════════════════════════════════
+-- ระบบ 3: AUTO DELIVERY
+-- ═══════════════════════════════════════════════
+local function buildDeliveryCart()
+    local inv = getInventory()
+    local cart = {}
+    if not DeliveryConfig or not DeliveryConfig.Items then return cart end
+    
+    for name, count in pairs(inv) do
+        if type(count) == "number" and count > 0 and DeliveryConfig.Items[name] then
+            cart[name] = count
+        end
+    end
+    return cart
+end
+
+local function isInventoryFull()
+    local inv = getInventory()
+    local total = 0
+    for _, c in pairs(inv) do
+        total = total + (tonumber(c) or 0)
+    end
+    
+    local farmLevel = LocalPlayer:GetAttribute("FarmLevel") or 1
+    local maxCap = 20
+    if BarnConfig and BarnConfig[farmLevel] then
+        maxCap = BarnConfig[farmLevel].MaxInventoryCapacity or 20
+    end
+    
+    local mult = 1
+    mult = mult + (LocalPlayer:GetAttribute("ExtraStorage_Level") or 0) * 0.03
+    mult = mult + (LocalPlayer:GetAttribute("StorageExpansion_Level") or 0) * 0.04
+    
+    if LocalPlayer:GetAttribute("IsBackpackSuper") == true then
+        mult = mult * 1.5
+    end
+    
+    if PetSkillConfig then
+        local pet = PetSkillConfig.getPlayerStatBonus(LocalPlayer, "BackpackCapacity")
+        if pet and pet > 0 then mult = mult + pet / 100 end
+    end
+    
+    local realMax = math.floor(maxCap * mult)
+    return (total / realMax) >= CONFIG.DeliveryThreshold
+end
+
+local function autoDeliveryLoop()
+    task.spawn(function()
+        log("🚚 Auto Delivery started")
+        while CONFIG.AutoDelivery and _G.AUTO_FARM_LOADED do
+            task.wait(CONFIG.DeliveryCooldown)
+            
+            if LocalPlayer:GetAttribute("IsDelivering") == true then continue end
+            if not RequestSendDelivery then continue end
+            
+            if isInventoryFull() then
+                local cart = buildDeliveryCart()
+                if next(cart) then
+                    log("🚚 Sending delivery...")
+                    local ok = pcall(function()
+                        RequestSendDelivery:InvokeServer(cart)
+                    end)
+                    if ok then
+                        log("✅ Delivery sent")
+                    end
+                end
+            end
+        end
+        log("🚚 Auto Delivery stopped")
+    end)
+end
+
+-- ═══════════════════════════════════════════════
+-- ระบบ 4: AUTO BUY ANIMAL
+-- ═══════════════════════════════════════════════
+local function getCurrentAnimalCapacity()
+    local farmLevel = LocalPlayer:GetAttribute("FarmLevel") or 1
+    local maxCap = 5
+    if BarnConfig and BarnConfig[farmLevel] then
+        maxCap = BarnConfig[farmLevel].MaxAnimalCapacity or 5
+    end
+    
+    local extra = LocalPlayer:GetAttribute("ExtraAnimal_Level") or 0
+    maxCap = math.floor(maxCap * (1 + extra * 0.03))
+    
+    -- นับ capacity ที่ใช้ไป
+    local used = 0
+    local activeJson = LocalPlayer:GetAttribute("ActiveAnimals_JSON") or "{}"
+    local ok, data = pcall(HttpService.JSONDecode, HttpService, activeJson)
+    if ok and type(data) == "table" and AnimalConfig then
+        for name, count in pairs(data) do
+            local cfg = AnimalConfig[name]
+            if cfg and cfg.CapacityCost then
+                used = used + cfg.CapacityCost * count
+            end
+        end
+    end
+    
+    return used, maxCap
+end
+
+local function autoBuyAnimalLoop()
+    task.spawn(function()
+        log("🐔 Auto Buy Animal started")
+        while CONFIG.AutoBuyAnimal and _G.AUTO_FARM_LOADED do
+            task.wait(CONFIG.BuyCooldown)
+            
+            if not RequestBuyAnimal or not AnimalConfig then continue end
+            if getMoneyNumber() <= CONFIG.MinMoneyReserve then continue end
+            
+            local used, maxCap = getCurrentAnimalCapacity()
+            if used >= maxCap then continue end
+            
+            for _, animalName in ipairs(CONFIG.BuyAnimalList) do
+                local cfg = AnimalConfig[animalName]
+                if not cfg then continue end
+                
+                local price = cfg.Price or 0
+                local rebirthCount = LocalPlayer:GetAttribute("RebirthCount") or 0
+                local mult = RebirthConfig and RebirthConfig.GetPriceMultiplier(rebirthCount) or 1
+                local finalPrice = price * mult
+                
+                local smartShopper = LocalPlayer:GetAttribute("SmartShopper_Level") or 0
+                finalPrice = finalPrice * (1 - smartShopper * 0.05)
+                
+                if getMoneyNumber() - finalPrice > CONFIG.MinMoneyReserve then
+                    local ok = pcall(function()
+                        RequestBuyAnimal:InvokeServer(animalName)
+                    end)
+                    if ok then
+                        log("🐔 Bought", animalName)
+                        task.wait(0.5)
+                    end
+                    break
+                end
+            end
+        end
+        log("🐔 Auto Buy Animal stopped")
+    end)
+end
+
+-- ═══════════════════════════════════════════════
+-- ระบบ 5: AUTO FACTORY
+-- ═══════════════════════════════════════════════
+local function getUnlockedFactories()
+    local json = LocalPlayer:GetAttribute("UnlockedFactories_JSON") or "{}"
+    local ok, data = pcall(HttpService.JSONDecode, HttpService, json)
+    if not ok or type(data) ~= "table" then return {} end
+    local list = {}
+    for name, unlocked in pairs(data) do
+        if unlocked == true then table.insert(list, name) end
+    end
+    return list
+end
+
+local function autoFactoryLoop()
+    task.spawn(function()
+        log("🏭 Auto Factory started")
+        while CONFIG.AutoFactory and _G.AUTO_FARM_LOADED do
+            task.wait(CONFIG.FactoryCooldown)
+            
+            local factories = getUnlockedFactories()
+            if #factories == 0 then continue end
+            
+            local inv = getInventory()
+            
+            for _, factoryName in ipairs(factories) do
+                -- Auto Claim
+                if CONFIG.AutoClaimProduction and RequestClaimProduction then
+                    local ready = LocalPlayer:GetAttribute(factoryName .. "_ReadyOutput")
+                    if ready and ready > 0 then
+                        pcall(function()
+                            RequestClaimProduction:InvokeServer(factoryName)
+                        end)
+                    end
+                end
+                
+                -- Auto Start
+                if CONFIG.AutoStartProduction and RequestStartProduction and FactoryConfig then
+                    local cfg = FactoryConfig[factoryName]
+                    if cfg and cfg.InputName then
+                        -- ลองทุกระดับ tier
+                        for _, tier in ipairs({"", " Emas", " Sakura", " Cosmic"}) do
+                            local inputName = cfg.InputName .. tier
+                            if (inv[inputName] or 0) > 0 then
+                                pcall(function()
+                                    RequestStartProduction:InvokeServer(factoryName, inputName)
+                                end)
+                                break
+                            end
+                        end
+                    end
+                end
+            end
+        end
+        log("🏭 Auto Factory stopped")
+    end)
+end
+
+-- ═══════════════════════════════════════════════
+-- ระบบ 6: AUTO CLAIM QUEST
+-- ═══════════════════════════════════════════════
+local function autoQuestLoop()
+    task.spawn(function()
+        log("🎁 Auto Quest started")
+        while CONFIG.AutoClaimQuest and _G.AUTO_FARM_LOADED do
+            task.wait(CONFIG.QuestCooldown)
+            
+            if not RequestQuestData or not ClaimQuest then continue end
+            
+            local ok, data = pcall(function()
+                return RequestQuestData:InvokeServer()
+            end)
+            if not ok or type(data) ~= "table" then continue end
+            
+            local function claimList(list)
+                for _, quest in ipairs(list or {}) do
+                    if quest.Completed then
+                        pcall(function()
+                            ClaimQuest:InvokeServer(quest.Id)
+                        end)
+                        log("🎁 Claimed quest:", quest.Id)
+                        task.wait(0.3)
+                    end
+                end
+            end
+            
+            claimList(data.Daily)
+            claimList(data.Weekly)
+        end
+        log("🎁 Auto Quest stopped")
+    end)
+end
+
+-- ═══════════════════════════════════════════════
+-- ระบบ 7: AUTO REBIRTH
+-- ═════════════════════════════════════════════
